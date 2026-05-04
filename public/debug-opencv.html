@@ -1,0 +1,623 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenCV 识别调试</title>
+  <style>
+    body { font-family: monospace; max-width: 1400px; margin: 20px auto; padding: 20px; background: #1a1a2e; color: #eee; }
+    h1 { color: #f59e0b; }
+    h2 { color: #22c55e; font-size: 16px; margin-top: 20px; }
+    .container { display: flex; flex-wrap: wrap; gap: 20px; }
+    .box { background: #16213e; padding: 15px; border-radius: 10px; }
+    canvas { background: #000; border-radius: 5px; max-width: 100%; }
+    .log { background: #0f3460; padding: 10px; border-radius: 5px; max-height: 300px; overflow-y: auto; font-size: 12px; white-space: pre-wrap; }
+    .log-error { color: #ef4444; }
+    .log-warn { color: #f59e0b; }
+    .log-success { color: #22c55e; }
+    button { padding: 10px 20px; background: #f59e0b; border: none; border-radius: 5px; cursor: pointer; font-size: 14px; }
+    .result { background: #0f3460; padding: 15px; border-radius: 8px; margin-top: 10px; }
+    pre { background: #000; padding: 10px; border-radius: 5px; overflow-x: auto; font-size: 12px; }
+    .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; margin-top: 10px; }
+    .stat { background: #000; padding: 10px; border-radius: 5px; text-align: center; }
+    .stat-value { font-size: 24px; color: #f59e0b; }
+    .stat-label { font-size: 12px; color: #94a3b8; }
+  </style>
+</head>
+<body>
+  <h1>♟ 象棋识别调试工具</h1>
+
+  <div style="margin: 15px 0;">
+    <input type="file" id="imageInput" accept="image/*" style="display:none">
+    <button onclick="document.getElementById('imageInput').click()">📁 选择图片</button>
+    <button onclick="runTest()">▶ 运行识别测试</button>
+    <span id="fileName" style="margin-left: 10px; color: #94a3b8;"></span>
+  </div>
+
+  <div class="container">
+    <div class="box">
+      <h2>原始图片</h2>
+      <canvas id="original" width="600" height="600"></canvas>
+    </div>
+    <div class="box">
+      <h2>灰度图</h2>
+      <canvas id="grayscale" width="600" height="600"></canvas>
+    </div>
+    <div class="box">
+      <h2>边缘检测</h2>
+      <canvas id="edges" width="600" height="600"></canvas>
+    </div>
+    <div class="box">
+      <h2>检测结果</h2>
+      <canvas id="result" width="600" height="600"></canvas>
+    </div>
+  </div>
+
+  <h2>统计数据</h2>
+  <div class="stats">
+    <div class="stat"><div class="stat-value" id="pieces-detected">0</div><div class="stat-label">检测到棋子</div></div>
+    <div class="stat"><div class="stat-value" id="h-lines">0</div><div class="stat-label">水平线</div></div>
+    <div class="stat"><div class="stat-value" id="v-lines">0</div><div class="stat-label">垂直线</div></div>
+    <div class="stat"><div class="stat-value" id="process-time">0</div><div class="stat-label">处理时间(ms)</div></div>
+  </div>
+
+  <h2>结果 FEN</h2>
+  <div class="result">
+    <pre id="fen-output">等待识别...</pre>
+  </div>
+
+  <h2>日志</h2>
+  <div class="log" id="log"></div>
+
+<script type="module">
+// ============ 配置 ============
+const BOARD_ROWS = 10;
+const BOARD_COLS = 9;
+const DEBUG = true;
+
+// ============ 日志 ============
+const logEl = document.getElementById('log');
+let currentImage = null;
+let currentImageData = null;
+
+function log(msg, type = '') {
+  const line = document.createElement('div');
+  line.className = 'log-' + type;
+  line.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  logEl.appendChild(line);
+  logEl.scrollTop = logEl.scrollHeight;
+  console.log(msg);
+}
+
+// ============ 图片上传处理 ============
+document.getElementById('imageInput').addEventListener('change', function(e) {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  document.getElementById('fileName').textContent = file.name;
+  log(`已选择图片: ${file.name}`, 'log-success');
+
+  const reader = new FileReader();
+  reader.onload = function(event) {
+    currentImage = event.target.result;
+    loadImageToCanvas(currentImage);
+  };
+  reader.readAsDataURL(file);
+});
+
+function loadImageToCanvas(src) {
+  const img = new Image();
+  img.onload = function() {
+    originalCanvas = document.getElementById('original');
+    originalCanvas.width = img.width;
+    originalCanvas.height = img.height;
+    const ctx = originalCanvas.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    currentImageData = ctx.getImageData(0, 0, img.width, img.height);
+    log(`图片尺寸: ${img.width} x ${img.height}`);
+  };
+  img.src = src;
+}
+
+// ============ 图像处理 ============
+let originalCanvas, originalCtx;
+
+function loadImage(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.crossOrigin = 'anonymous';
+    img.onload = () => resolve(img);
+    img.onerror = reject;
+    img.src = src;
+  });
+}
+
+function imgToCanvas(img, canvas) {
+  canvas.width = img.width;
+  canvas.height = img.height;
+  const ctx = canvas.getContext('2d');
+  ctx.drawImage(img, 0, 0);
+  return ctx.getImageData(0, 0, img.width, img.height);
+}
+
+function canvasFromImageData(imageData) {
+  const canvas = new OffscreenCanvas(imageData.width, imageData.height);
+  const ctx = canvas.getContext('2d');
+  ctx.putImageData(imageData, 0, 0);
+  return canvas;
+}
+
+function getCanvasImageData(canvas) {
+  return canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height);
+}
+
+// ============ OpenCV 模拟函数 ============
+function toGrayscale(imageData) {
+  const { data, width, height } = imageData;
+  const gray = new Uint8ClampedArray(width * height);
+  for (let i = 0; i < width * height; i++) {
+    gray[i] = Math.round(0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2]);
+  }
+  return gray;
+}
+
+function gaussianBlur(gray, width, height, size = 5) {
+  const sigma = size / 6;
+  const half = Math.floor(size / 2);
+  const result = new Uint8ClampedArray(width * height);
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let sum = 0;
+      for (let ky = -half; ky <= half; ky++) {
+        for (let kx = -half; kx <= half; kx++) {
+          const px = Math.min(Math.max(x + kx, 0), width - 1);
+          const py = Math.min(Math.max(y + ky, 0), height - 1);
+          const weight = Math.exp(-(kx * kx + ky * ky) / (2 * sigma * sigma));
+          sum += gray[py * width + px] * weight;
+        }
+      }
+      result[y * width + x] = Math.round(sum);
+    }
+  }
+  return result;
+}
+
+function cannyEdgeDetection(gray, width, height) {
+  log('执行 Canny 边缘检测...');
+
+  // 1. 高斯模糊
+  const blurred = gaussianBlur(gray, width, height, 5);
+
+  // 2. Sobel 梯度 (修正公式)
+  const magnitude = new Uint8ClampedArray(width * height);
+  const direction = new Float32Array(width * height);
+
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const idx = y * width + x;
+
+      // Sobel X: [-1,0,1; -2,0,2; -1,0,1]
+      const gx = -blurred[(y-1)*width+(x-1)] + blurred[(y-1)*width+(x+1)]
+                - 2*blurred[y*width+(x-1)] + 2*blurred[y*width+(x+1)]
+                - blurred[(y+1)*width+(x-1)] + blurred[(y+1)*width+(x+1)];
+
+      // Sobel Y: [-1,-2,-1; 0,0,0; 1,2,1]
+      const gy = -blurred[(y-1)*width+(x-1)] - 2*blurred[(y-1)*width+x] - blurred[(y-1)*width+(x+1)]
+                + blurred[(y+1)*width+(x-1)] + 2*blurred[(y+1)*width+x] + blurred[(y+1)*width+(x+1)];
+
+      magnitude[idx] = Math.min(255, Math.sqrt(gx*gx + gy*gy));
+      direction[idx] = Math.atan2(gy, gx);
+    }
+  }
+
+  // 3. 非极大值抑制
+  const suppressed = new Uint8ClampedArray(width * height);
+  for (let y = 1; y < height - 1; y++) {
+    for (let x = 1; x < width - 1; x++) {
+      const idx = y * width + x;
+      const angle = direction[idx];
+      const mag = magnitude[idx];
+
+      // 角度标准化到 0-180 度范围
+      let deg = (angle * 180 / Math.PI + 180) % 180;
+
+      let q = 0, r = 0;
+
+      // 0度附近 - 水平线 (左右比较)
+      if (deg < 22.5 || deg >= 157.5) {
+        q = magnitude[idx + 1];
+        r = magnitude[idx - 1];
+      }
+      // 45度 - 斜线 (右上/左下比较)
+      else if (deg < 67.5) {
+        q = magnitude[idx - width + 1];
+        r = magnitude[idx + width - 1];
+      }
+      // 90度 - 垂直线 (上下比较)
+      else if (deg < 112.5) {
+        q = magnitude[idx - width];
+        r = magnitude[idx + width];
+      }
+      // 135度 - 斜线 (左上/右下比较)
+      else {
+        q = magnitude[idx - width - 1];
+        r = magnitude[idx + width + 1];
+      }
+
+      suppressed[idx] = (mag >= q && mag >= r) ? mag : 0;
+    }
+  }
+
+  // 4. 双阈值和边缘连接
+  const low = 30, high = 80;
+  const result = new Uint8ClampedArray(width * height);
+
+  for (let i = 0; i < suppressed.length; i++) {
+    result[i] = suppressed[i] >= high ? 255 : (suppressed[i] >= low ? 128 : 0);
+  }
+
+  // 边缘连接 - 将弱边缘连接到强边缘
+  for (let y = 2; y < height - 2; y++) {
+    for (let x = 2; x < width - 2; x++) {
+      if (result[y * width + x] === 128) {
+        const hasStrong = [-2,-1,0,1,2].some(dy =>
+          [-2,-1,0,1,2].some(dx => result[(y+dy)*width+(x+dx)] === 255)
+        );
+        result[y * width + x] = hasStrong ? 255 : 0;
+      }
+    }
+  }
+
+  return result;
+}
+
+function houghLines(edges, width, height) {
+  const maxRho = Math.sqrt(width * width + height * height);
+  const rhoRes = 2;
+  const thetaBins = 180;
+  const rhoBins = Math.ceil(2 * maxRho / rhoRes);
+  const acc = new Uint32Array(rhoBins * thetaBins);
+
+  // 采样以加速
+  const step = 2;
+  for (let y = 0; y < height; y += step) {
+    for (let x = 0; x < width; x += step) {
+      if (edges[y * width + x] === 255) {
+        for (let t = 0; t < thetaBins; t++) {
+          const theta = t * Math.PI / 180;
+          const rho = x * Math.cos(theta) + y * Math.sin(theta);
+          const ri = Math.round(rho / rhoRes + rhoBins / 2);
+          if (ri >= 0 && ri < rhoBins) acc[ri * thetaBins + t]++;
+        }
+      }
+    }
+  }
+
+  // 找峰值
+  const threshold = 50;
+  const lines = [];
+  for (let r = 0; r < rhoBins; r++) {
+    for (let t = 0; t < thetaBins; t++) {
+      if (acc[r * thetaBins + t] > threshold) {
+        lines.push({ rho: (r - rhoBins / 2) * rhoRes, theta: t * Math.PI / 180, votes: acc[r * thetaBins + t] });
+      }
+    }
+  }
+
+  return lines;
+}
+
+function detectPieceColor(imageData, x, y, radius) {
+  const { width, data } = imageData;
+  let red = 0, black = 0, total = 0;
+
+  for (let py = Math.max(0, Math.floor(y - radius)); py < Math.min(imageData.height, Math.ceil(y + radius)); py += 2) {
+    for (let px = Math.max(0, Math.floor(x - radius)); px < Math.min(width, Math.ceil(x + radius)); px += 2) {
+      const dist = Math.sqrt((px - x) ** 2 + (py - y) ** 2);
+      if (dist > radius) continue;
+
+      const idx = (py * width + px) * 4;
+      const r = data[idx], g = data[idx + 1], b = data[idx + 2];
+      total++;
+
+      // 红色检测 - 棋子是红/黄背景
+      if (r > 180 && r > g * 1.2 && r > b * 1.2) red++;
+      // 黑色检测
+      if (r < 60 && g < 60 && b < 60) black++;
+    }
+  }
+
+  if (total === 0) return { hasPiece: false, isRed: true, red: 0, black: 0, total };
+  return {
+    hasPiece: red / total > 0.05 || black / total > 0.1,
+    isRed: red > black,
+    red: red / total,
+    black: black / total,
+    total
+  };
+}
+
+// ============ 绘制函数 ============
+function drawGrayscale(gray, canvas) {
+  const width = canvas.width;
+  const height = canvas.height;
+  const ctx = canvas.getContext('2d');
+  const imageData = ctx.createImageData(width, height);
+
+  for (let i = 0; i < gray.length; i++) {
+    const v = gray[i];
+    imageData.data[i * 4] = v;
+    imageData.data[i * 4 + 1] = v;
+    imageData.data[i * 4 + 2] = v;
+    imageData.data[i * 4 + 3] = 255;
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+}
+
+function drawEdges(edges, canvas) {
+  const width = canvas.width;
+  const height = canvas.height;
+  const ctx = canvas.getContext('2d');
+  const imageData = ctx.createImageData(width, height);
+
+  for (let i = 0; i < edges.length; i++) {
+    const v = edges[i];
+    imageData.data[i * 4] = v;
+    imageData.data[i * 4 + 1] = v;
+    imageData.data[i * 4 + 2] = v;
+    imageData.data[i * 4 + 3] = 255;
+  }
+
+  ctx.putImageData(imageData, 0, 0);
+}
+
+function drawResult(imageData, pieces, boardRegion, canvas) {
+  const { width, height, data } = imageData;
+  canvas.width = width;
+  canvas.height = height;
+  const ctx = canvas.getContext('2d');
+
+  // 绘制原图
+  ctx.putImageData(imageData, 0, 0);
+
+  // 绘制棋盘区域
+  if (boardRegion) {
+    ctx.strokeStyle = '#00ff00';
+    ctx.lineWidth = 3;
+    ctx.strokeRect(boardRegion.x, boardRegion.y, boardRegion.w, boardRegion.h);
+  }
+
+  // 绘制棋子位置
+  const cellW = boardRegion ? boardRegion.w / 8 : width / 8;
+  const cellH = boardRegion ? boardRegion.h / 9 : height / 9;
+
+  for (const piece of pieces) {
+    const x = (boardRegion ? boardRegion.x : 0) + (piece.col + 0.5) * cellW;
+    const y = (boardRegion ? boardRegion.y : 0) + (piece.row + 0.5) * cellH;
+    const radius = Math.min(cellW, cellH) * 0.35;
+
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.strokeStyle = piece.color === 'red' ? '#ff0000' : '#000000';
+    ctx.lineWidth = 3;
+    ctx.stroke();
+
+    ctx.fillStyle = piece.color === 'red' ? '#ff0000' : '#000000';
+    ctx.font = '12px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(piece.type, x, y);
+  }
+}
+
+// ============ 主识别流程 ============
+async function recognizeBoard(imageData, width, height) {
+  const startTime = performance.now();
+
+  // 1. 灰度转换
+  log('1. 灰度转换...');
+  const gray = toGrayscale(imageData);
+
+  // 2. 边缘检测
+  log('2. Canny 边缘检测...');
+  const edges = cannyEdgeDetection(gray, width, height);
+
+  // 3. 霍夫变换检测直线
+  log('3. 霍夫变换检测直线...');
+  const lines = houghLines(edges, width, height);
+  log(`   检测到 ${lines.length} 条线段`, lines.length > 0 ? '' : 'log-warn');
+
+  // 分类水平和垂直线
+  const hLines = lines.filter(l => {
+    const deg = Math.abs(l.theta * 180 / Math.PI) % 180;
+    return deg < 10 || deg > 170;
+  });
+  const vLines = lines.filter(l => {
+    const deg = Math.abs(l.theta * 180 / Math.PI) % 180;
+    return deg >= 80 && deg <= 100;
+  });
+
+  log(`   水平线: ${hLines.length}, 垂直线: ${vLines.length}`);
+
+  // 4. 确定棋盘区域
+  let boardRegion;
+  if (hLines.length >= 2 && vLines.length >= 2) {
+    hLines.sort((a, b) => a.rho - b.rho);
+    vLines.sort((a, b) => a.rho - b.rho);
+
+    boardRegion = {
+      x: Math.max(0, vLines[0].rho - 30),
+      y: Math.max(0, hLines[0].rho - 30),
+      w: Math.min(width, vLines[vLines.length - 1].rho - vLines[0].rho + 60),
+      h: Math.min(height, hLines[hLines.length - 1].rho - hLines[0].rho + 60)
+    };
+    log(`   棋盘区域: x=${boardRegion.x.toFixed(0)}, y=${boardRegion.y.toFixed(0)}, w=${boardRegion.w.toFixed(0)}, h=${boardRegion.h.toFixed(0)}`);
+  } else {
+    // 使用默认区域
+    const pad = Math.min(width, height) * 0.05;
+    boardRegion = { x: pad, y: pad, w: width - pad * 2, h: height - pad * 2 };
+    log('   使用默认棋盘区域', 'log-warn');
+  }
+
+  // 5. 检测棋子
+  log('4. 检测棋子...');
+  const pieces = [];
+  const cellW = boardRegion.w / 8;
+  const cellH = boardRegion.h / 9;
+  const radius = Math.min(cellW, cellH) * 0.35;
+
+  for (let row = 0; row < BOARD_ROWS; row++) {
+    for (let col = 0; col < BOARD_COLS; col++) {
+      const x = boardRegion.x + (col + 0.5) * cellW;
+      const y = boardRegion.y + (row + 0.5) * cellH;
+
+      const colorInfo = detectPieceColor(imageData, x, y, radius);
+
+      if (colorInfo.hasPiece) {
+        const type = inferPieceType(row, col, colorInfo.isRed);
+        pieces.push({
+          row, col,
+          color: colorInfo.isRed ? 'red' : 'black',
+          type,
+          redRatio: colorInfo.red,
+          blackRatio: colorInfo.black
+        });
+      }
+    }
+  }
+
+  const processTime = performance.now() - startTime;
+  log(`   检测到 ${pieces.length} 个棋子，耗时 ${processTime.toFixed(0)}ms`);
+
+  return { pieces, boardRegion, hLines, vLines, processTime };
+}
+
+function inferPieceType(row, col, isRed) {
+  // 标准开局位置
+  // 后方位置 row = 0 (黑) 或 row = 9 (红)
+  // 前方位置 row = 3,6 (兵/卒) 或 row = 2,7 (炮)
+
+  if (col === 4) {
+    // 中路
+    if (row === 0) return isRed ? '將' : '將';
+    if (row === 9) return isRed ? '帥' : '帥';
+    return isRed ? '兵' : '卒';
+  }
+
+  if (col === 0 || col === 8) {
+    // 車
+    if (row === 0 || row === 9) return '車';
+    return isRed ? '兵' : '卒';
+  }
+
+  if (col === 1 || col === 7) {
+    // 馬
+    if (row === 0 || row === 9) return '馬';
+    return isRed ? '兵' : '卒';
+  }
+
+  if (col === 2 || col === 6) {
+    // 相/象
+    if (row === 0 || row === 9) return isRed ? '相' : '象';
+    return isRed ? '兵' : '卒';
+  }
+
+  if (col === 3 || col === 5) {
+    // 士
+    if (row === 0 || row === 9) return isRed ? '仕' : '士';
+    return isRed ? '兵' : '卒';
+  }
+
+  return isRed ? '兵' : '卒';
+}
+
+function toFen(pieces) {
+  const PIECE_MAP = {
+    '帥': 'K', '將': 'k', '車': 'R', '馬': 'N', '相': 'B', '象': 'b',
+    '仕': 'A', '士': 'a', '炮': 'C', '兵': 'P', '卒': 'p'
+  };
+
+  const board = Array(BOARD_ROWS).fill(null).map(() => Array(BOARD_COLS).fill(''));
+
+  for (const p of pieces) {
+    const fen = PIECE_MAP[p.type] || (p.color === 'red' ? 'P' : 'p');
+    if (board[p.row][p.col] === '') board[p.row][p.col] = fen;
+  }
+
+  return board.map(row => {
+    let s = '', empty = 0;
+    for (const p of row) {
+      if (p === '') empty++;
+      else { if (empty) { s += empty; empty = 0; } s += p; }
+    }
+    return s + (empty ? empty : '');
+  }).join('/') + ' w - - 0 1';
+}
+
+// ============ 主测试函数 ============
+window.runTest = async function() {
+  logEl.innerHTML = '';
+  log('开始识别测试...', 'log-success');
+
+  if (!currentImageData) {
+    log('请先选择一张图片', 'log-error');
+    return;
+  }
+
+  const startTime = performance.now();
+
+  try {
+    const imageData = currentImageData;
+    const img = new Image();
+    img.src = currentImage;
+    log(`图片尺寸: ${img.width} x ${img.height}`);
+
+    // 显示灰度图
+    log('处理灰度图...');
+    const gray = toGrayscale(imageData);
+    drawGrayscale(gray, document.getElementById('grayscale'));
+
+    // 显示边缘检测
+    log('处理边缘检测...');
+    const edges = cannyEdgeDetection(gray, img.width, img.height);
+    drawEdges(edges, document.getElementById('edges'));
+
+    // 执行识别
+    const result = await recognizeBoard(imageData, img.width, img.height);
+
+    // 显示结果
+    drawResult(imageData, result.pieces, result.boardRegion, document.getElementById('result'));
+
+    // 更新统计
+    document.getElementById('pieces-detected').textContent = result.pieces.length;
+    document.getElementById('h-lines').textContent = result.hLines.length;
+    document.getElementById('v-lines').textContent = result.vLines.length;
+    document.getElementById('process-time').textContent = result.processTime.toFixed(0);
+
+    // 生成 FEN
+    const fen = toFen(result.pieces);
+    document.getElementById('fen-output').textContent = fen;
+
+    log('');
+    log('识别完成!', 'log-success');
+    log(`FEN: ${fen}`);
+    log(`预期 FEN: rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1`);
+
+    // 检查结果
+    const expectedFen = 'rnbakabnr/9/1c5c1/p1p1p1p1p/9/9/P1P1P1P/1C5C1/9/RNBAKABNR w - - 0 1';
+    if (fen === expectedFen) {
+      log('✓ 识别正确!', 'log-success');
+    } else {
+      log('✗ 识别不正确', 'log-error');
+    }
+
+  } catch (error) {
+    log(`错误: ${error.message}`, 'log-error');
+    console.error(error);
+  }
+};
+</script>
+</body>
+</html>

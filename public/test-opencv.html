@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>棋盘识别测试 - OpenCV</title>
+  <style>
+    body { font-family: system-ui; max-width: 900px; margin: 40px auto; padding: 20px; background: #1a1a2e; color: #eee; }
+    h1 { color: #f59e0b; margin-bottom: 20px; }
+    .test-section { background: #16213e; padding: 20px; border-radius: 10px; margin: 20px 0; }
+    .result { background: #0f3460; padding: 15px; border-radius: 8px; margin-top: 15px; }
+    .success { color: #22c55e; }
+    .error { color: #ef4444; }
+    pre { background: #000; padding: 10px; border-radius: 5px; overflow-x: auto; font-size: 12px; }
+    img { max-width: 100%; border-radius: 8px; margin: 10px 0; }
+    button { padding: 10px 20px; background: #f59e0b; border: none; border-radius: 5px; cursor: pointer; font-size: 16px; color: #000; }
+    button:hover { background: #d97706; }
+    button:disabled { background: #64748b; cursor: not-allowed; }
+    .progress-bar { width: 100%; height: 20px; background: #334155; border-radius: 10px; overflow: hidden; margin: 10px 0; }
+    .progress-fill { height: 100%; background: linear-gradient(90deg, #f59e0b, #d97706); transition: width 0.3s; }
+    #console-output { height: 200px; overflow-y: auto; font-family: monospace; font-size: 12px; }
+    .log-line { margin: 2px 0; }
+    .log-error { color: #ef4444; }
+    .log-warn { color: #f59e0b; }
+  </style>
+</head>
+<body>
+  <h1>♟ 象棋棋盘识别测试 - OpenCV</h1>
+
+  <div class="test-section">
+    <h2>测试图片</h2>
+    <img src="assets/c__Users_hongy_AppData_Roaming_Cursor_User_workspaceStorage_5173796ee0fa2a42f38596a38483e96d_images______20260504211829_8_2-e4f0a12a-ec2d-45d5-a61b-70ac6aaf0383.png" alt="测试棋盘" id="preview" style="max-height: 400px;" />
+    <p style="color: #94a3b8;">象棋开局图片 - 红方在下方</p>
+  </div>
+
+  <div class="test-section">
+    <h2>OpenCV 识别测试</h2>
+    <div id="status">等待开始...</div>
+    <div class="progress-bar" style="display: none;">
+      <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+    </div>
+    <div id="result" class="result" style="display:none;">
+      <p><strong>状态:</strong> <span id="status-text" class="success"></span></p>
+      <p><strong>识别结果 FEN:</strong></p>
+      <pre id="fen"></pre>
+      <p><strong>置信度:</strong> <span id="confidence" style="color: #22c55e;"></span>%</p>
+      <p><strong>检测到棋子:</strong> <span id="pieces-count"></span></p>
+      <p><strong>处理时间:</strong> <span id="time"></span>ms</p>
+    </div>
+    <button onclick="startTest()" id="start-btn" style="margin-top: 15px;">开始 OpenCV 识别测试</button>
+  </div>
+
+  <div class="test-section">
+    <h2>控制台输出</h2>
+    <pre id="console-output"></pre>
+  </div>
+
+  <script type="module">
+    const output = document.getElementById('console-output');
+
+    function log(message, isError = false) {
+      const line = document.createElement('div');
+      line.className = 'log-line' + (isError ? ' log-error' : '');
+      line.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+      output.appendChild(line);
+      output.scrollTop = output.scrollHeight;
+      console.log(message);
+    }
+
+    function logError(message) {
+      log(message, true);
+    }
+
+    window.addEventListener('error', (msg, url, line, col, error) => {
+      logError(`[ERROR] ${msg} at line ${line}`);
+      if (error && error.stack) logError(error.stack);
+    });
+
+    async function startTest() {
+      const statusEl = document.getElementById('status');
+      const resultEl = document.getElementById('result');
+      const statusText = document.getElementById('status-text');
+      const fenEl = document.getElementById('fen');
+      const confidenceEl = document.getElementById('confidence');
+      const piecesCountEl = document.getElementById('pieces-count');
+      const timeEl = document.getElementById('time');
+      const progressFill = document.getElementById('progress-fill');
+      const progressBar = document.querySelector('.progress-bar');
+      const startBtn = document.getElementById('start-btn');
+
+      startBtn.disabled = true;
+      startBtn.textContent = '测试中...';
+      statusEl.textContent = '正在初始化...';
+      resultEl.style.display = 'none';
+      progressBar.style.display = 'block';
+      progressFill.style.width = '0%';
+
+      try {
+        log('加载 OpenCV 识别模块...');
+
+        const { recognizeBoardOpenCV } = await import('/src/lib/opencv-recognizer.ts');
+
+        log('模块加载成功!');
+        log('开始识别...');
+
+        const imagePath = document.getElementById('preview').src;
+        log(`图片: ${imagePath}`);
+
+        const result = await recognizeBoardOpenCV(imagePath, (progress, message) => {
+          log(`${message} (${progress}%)`);
+          statusEl.textContent = message;
+          progressFill.style.width = progress + '%';
+        });
+
+        log('');
+        log('==========================================');
+        log('识别完成!');
+        log('==========================================');
+        log(`FEN: ${result.fen}`);
+        log(`置信度: ${result.confidence.toFixed(1)}%`);
+        log(`棋子数量: ${result.pieces.length}`);
+        log(`处理时间: ${result.processingTime.toFixed(2)}ms`);
+
+        statusEl.textContent = '识别完成';
+        resultEl.style.display = 'block';
+        statusText.textContent = result.message;
+        fenEl.textContent = result.fen;
+        confidenceEl.textContent = result.confidence.toFixed(1);
+        piecesCountEl.textContent = result.pieces.length;
+        timeEl.textContent = result.processingTime.toFixed(2);
+        progressFill.style.width = '100%';
+
+      } catch (error) {
+        logError('识别失败!');
+        logError(`错误: ${error.message}`);
+        if (error.stack) logError(error.stack);
+        statusEl.innerHTML = `<span class="error">识别失败: ${error.message}</span>`;
+        progressFill.style.width = '0%';
+      } finally {
+        startBtn.disabled = false;
+        startBtn.textContent = '再次测试';
+      }
+    }
+
+    window.startTest = startTest;
+  </script>
+</body>
+</html>
